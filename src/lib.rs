@@ -1,14 +1,77 @@
+mod gftables;
 mod matrix;
+mod table_aes;
 
 pub mod error;
 
 use core::arch::x86_64::{self, __m512i};
+use core::iter::{self, FromIterator};
 use error::Error;
 use lru::LruCache;
 use matrix::Matrix;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::sync::Arc;
+
+const DATA_DECODE_MATRIX_CACHE_CAPACITY: usize = 254;
+
+/// Something which might hold a shard.
+///
+/// This trait is used in reconstruction, where some of the shards
+/// may be unknown.
+pub trait ReconstructShard {
+    /// The size of the shard data; `None` if empty.
+    fn len(&self) -> Option<usize>;
+
+    /// Get a mutable reference to the shard data, returning `None` if uninitialized.
+    fn get(&mut self) -> Option<&mut [u8]>;
+
+    /// Get a mutable reference to the shard data, initializing it to the
+    /// given length if it was `None`. Returns an error if initialization fails.
+    fn get_or_initialize(&mut self, len: usize) -> Result<&mut [u8], Result<&mut [u8], Error>>;
+}
+
+impl<T: AsRef<[u8]> + AsMut<[u8]> + FromIterator<u8>> ReconstructShard for Option<T> {
+    fn len(&self) -> Option<usize> {
+        self.as_ref().map(|x| x.as_ref().len())
+    }
+
+    fn get(&mut self) -> Option<&mut [u8]> {
+        self.as_mut().map(|x| x.as_mut())
+    }
+
+    fn get_or_initialize(&mut self, len: usize) -> Result<&mut [u8], Result<&mut [u8], Error>> {
+        let is_some = self.is_some();
+        let x = self
+            .get_or_insert_with(|| iter::repeat_n(0, len).collect())
+            .as_mut();
+
+        if is_some { Ok(x) } else { Err(Ok(x)) }
+    }
+}
+
+impl<T: AsRef<[u8]> + AsMut<[u8]>> ReconstructShard for (T, bool) {
+    fn len(&self) -> Option<usize> {
+        if !self.1 {
+            None
+        } else {
+            Some(self.0.as_ref().len())
+        }
+    }
+
+    fn get(&mut self) -> Option<&mut [u8]> {
+        if !self.1 { None } else { Some(self.0.as_mut()) }
+    }
+
+    fn get_or_initialize(&mut self, len: usize) -> Result<&mut [u8], Result<&mut [u8], Error>> {
+        let x = self.0.as_mut();
+        if x.len() == len {
+            if self.1 { Ok(x) } else { Err(Ok(x)) }
+        } else {
+            Err(Err(Error::IncorrectShardSize))
+        }
+    }
+}
 
 pub struct ReedSolomon {
     data_shard_count: usize,
@@ -19,6 +82,34 @@ pub struct ReedSolomon {
 }
 
 impl ReedSolomon {
+    pub fn new(data_shards: usize, parity_shards: usize) -> Result<ReedSolomon, Error> {
+        if data_shards == 0 {
+            return Err(Error::TooFewDataShards);
+        }
+        if parity_shards == 0 {
+            return Err(Error::TooFewParityShards);
+        }
+        if data_shards + parity_shards > F::ORDER {
+            return Err(Error::TooManyShards);
+        }
+
+        let total_shards = data_shards + parity_shards;
+
+        let encode_coeffs = Self::generate_encode_coeffs(data_shards, total_shards);
+
+        Ok(ReedSolomon {
+            data_shard_count: data_shards,
+            parity_shard_count: parity_shards,
+            total_shard_count: total_shards,
+            encode_coeffs,
+            data_decode_coeffs_cache: Mutex::new(LruCache::new(
+                DATA_DECODE_MATRIX_CACHE_CAPACITY
+                    .try_into()
+                    .expect("non-0 constant; qed"),
+            )),
+        })
+    }
+
     pub fn encode<T, U>(&self, mut shards: T) -> Result<(), Error>
     where
         T: AsRef<[U]> + AsMut<[U]>,
@@ -77,6 +168,43 @@ impl ReedSolomon {
         (self.data_shard_count..self.total_shard_count)
             .map(|i| self.encode_coeffs.get_row(i))
             .collect()
+    }
+
+    fn get_data_decode_coeffs(
+        &self,
+        valid_indices: &[usize],
+        invalid_indices: &[usize],
+    ) -> Arc<Matrix> {
+        {
+            let mut cache = self.data_decode_coeffs_cache.lock();
+            if let Some(entry) = cache.get(invalid_indices) {
+                return entry.clone();
+            }
+        }
+
+        let mut inverted_decode_coeffs = Matrix::zero(self.data_shard_count, self.data_shard_count);
+        for (inverted_decode_coeffs_row, &valid_index) in valid_indices.iter().enumerate() {
+            for c in 0..self.data_shard_count {
+                inverted_decode_coeffs.set(
+                    inverted_decode_coeffs_row,
+                    c,
+                    self.encode_coeffs.get(valid_index, c),
+                );
+            }
+        }
+        let data_decode_coeffs = Arc::new(inverted_decode_coeffs.inv().unwrap());
+        {
+            let data_decode_coeffs = data_decode_coeffs.clone();
+            let mut cache = self.data_decode_coeffs_cache.lock();
+            cache.put(Vec::from(invalid_indices), data_decode_coeffs);
+        }
+        data_decode_coeffs
+    }
+
+    pub fn reconstruct<T: ReconstructShard>(&self, shards: &mut [T]) -> Result<(), Error> {
+        // TODO: checks
+
+        Ok(())
     }
 }
 
