@@ -10,4 +10,8 @@ pub enum Error {
     TooFewParityShards,
     #[error("Too many shards")]
     TooManyShards,
+    #[error("Empty shard")]
+    EmptyShard,
+    #[error("Too few shards present")]
+    TooFewShardsPresent,
 }

@@ -14,6 +14,7 @@ use smallvec::SmallVec;
 use std::sync::Arc;
 
 const DATA_DECODE_MATRIX_CACHE_CAPACITY: usize = 254;
+const DATA_OR_PARITY_SHARD_MAX_COUNT: usize = 32;
 
 /// Something which might hold a shard.
 ///
@@ -89,13 +90,12 @@ impl ReedSolomon {
         if parity_shards == 0 {
             return Err(Error::TooFewParityShards);
         }
-        if data_shards + parity_shards > F::ORDER {
+        if data_shards + parity_shards > gftables::FIELD_SIZE {
             return Err(Error::TooManyShards);
         }
 
         let total_shards = data_shards + parity_shards;
-
-        let encode_coeffs = Self::generate_encode_coeffs(data_shards, total_shards);
+        let encode_coeffs = Matrix::encode_coeffs(total_shards, data_shards);
 
         Ok(ReedSolomon {
             data_shard_count: data_shards,
@@ -115,7 +115,7 @@ impl ReedSolomon {
         T: AsRef<[U]> + AsMut<[U]>,
         U: AsRef<[u8]> + AsMut<[u8]>,
     {
-        // TODO: checks
+        // FIXME: checks
 
         let slices: &mut [U] = shards.as_mut();
 
@@ -129,46 +129,56 @@ impl ReedSolomon {
         T: AsRef<[u8]>,
         U: AsMut<[u8]>,
     {
-        // TODO: checks or no checks?
-        // do this at construction time: assert!(self.data_shard)_count > 0);
-        let shard_len = input.len();
-        // TODO: into Error
-        assert_eq!(shard_len, output.len());
-
-        let num_chunks = shard_len / 64;
-        let tail_len = shard_len % 64;
-        let tail_offset = num_chunks * 64;
+        // FIXME: checks
 
         let encode_coeffs_parity_rows = self.get_encode_coeffs_parity_rows();
-
-        for (coeff_row, p) in output.iter_mut().enumerate() {
-            let p = p.as_mut();
-
-            // Initialise the parity row `p`. Do that outside the loop below to avoid a conditional jump.
-            let coeff0 = encode_coeffs_parity_rows[coeff_row][0];
-            let d0 = input[0].as_ref();
-            unsafe {
-                mul_slice(coeff0, d0, p, num_chunks, tail_len, tail_offset);
-            }
-
-            // Sum up further codes on the same row `p`.
-            for (coeff_col, d) in input.iter().enumerate().skip(1) {
-                let coeff = encode_coeffs_parity_rows[coeff_row][coeff_col];
-                let d = d.as_ref();
-                unsafe {
-                    mul_slice_add(coeff, d, p, num_chunks, tail_len, tail_offset);
-                }
-            }
-        }
+        self.apply_coeffs(&encode_coeffs_parity_rows, input, output);
 
         Ok(())
     }
 
-    fn get_encode_coeffs_parity_rows(&self) -> SmallVec<[&[u8]; 32]> {
+    fn apply_coeffs<T, U>(&self, coeffs: &[&[u8]], input: &[T], output: &mut [U])
+    where
+        T: AsRef<[u8]>,
+        U: AsMut<[u8]>,
+    {
+        let shard_len = coeffs[0].len();
+        let num_chunks = shard_len / 64;
+        let tail_len = shard_len % 64;
+        let tail_offset = num_chunks * 64;
+
+        for (coeff_row, out) in output.iter_mut().enumerate() {
+            let out = out.as_mut();
+
+            // Initialise the parity row `p`. Do that outside the loop below to avoid a conditional jump.
+            let coeff0 = coeffs[coeff_row][0];
+            let inp0 = input[0].as_ref();
+            unsafe {
+                mul_slice(coeff0, inp0, out, num_chunks, tail_len, tail_offset);
+            }
+
+            // Sum up further codes on the same row `p`.
+            for (coeff_col, inp) in input.iter().enumerate().skip(1) {
+                let coeff = coeffs[coeff_row][coeff_col];
+                let inp = inp.as_ref();
+                unsafe {
+                    mul_slice_add(coeff, inp, out, num_chunks, tail_len, tail_offset);
+                }
+            }
+        }
+    }
+
+    fn get_encode_coeffs_parity_rows(&self) -> SmallVec<[&[u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> {
         (self.data_shard_count..self.total_shard_count)
             .map(|i| self.encode_coeffs.get_row(i))
             .collect()
     }
+
+    // //  A variant of the above.
+    // fn parity_encode_coeffs(&self) -> SubmatrixRows {
+    //     self.encode_coeffs
+    //         .submatrix_rows(self.data_shard_count..self.total_shard_count)
+    // }
 
     fn get_data_decode_coeffs(
         &self,
@@ -202,9 +212,105 @@ impl ReedSolomon {
     }
 
     pub fn reconstruct<T: ReconstructShard>(&self, shards: &mut [T]) -> Result<(), Error> {
-        // TODO: checks
+        let check = CheckReconstructShards::new(shards)?;
+
+        if check.non_empty_shard_count == self.total_shard_count {
+            return Ok(());
+        }
+
+        if check.non_empty_shard_count < self.data_shard_count {
+            return Err(Error::TooFewShardsPresent);
+        }
+
+        let shard_len = check.shard_len.expect("there are > 0 shards; qed");
+
+        // FIXME: invalid_indices are not bound by data_shard_count, so the SmallVec should be larger.
+        let mut valid_shards: SmallVec<[&[u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+            SmallVec::with_capacity(self.data_shard_count);
+        let mut valid_indices: SmallVec<[usize; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+            SmallVec::with_capacity(self.data_shard_count);
+        let mut invalid_indices: SmallVec<[usize; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+            SmallVec::with_capacity(self.data_shard_count);
+        let mut missing_data_shards: SmallVec<[&mut [u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+            SmallVec::with_capacity(self.data_shard_count);
+        let mut missing_parity_shards: SmallVec<[&[u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+            SmallVec::with_capacity(self.data_shard_count);
+
+        for (shard_idx, shard) in shards.iter_mut().enumerate() {
+            match shard.get_or_initialize(shard_len) {
+                Ok(shard) => {
+                    // Only `data_shard_count` shards are needed to recover remaining shards.
+                    if valid_shards.len() < self.data_shard_count {
+                        valid_shards.push(shard);
+                        valid_indices.push(shard_idx);
+                    }
+                }
+                Err(Err(_)) => {
+                    invalid_indices.push(shard_idx);
+                }
+                Err(Ok(shard)) => {
+                    if shard_idx < self.data_shard_count {
+                        missing_data_shards.push(shard);
+                    } else {
+                        missing_parity_shards.push(shard);
+                    }
+                    invalid_indices.push(shard_idx);
+                }
+            }
+        }
+
+        let data_decode_coeffs = self.get_data_decode_coeffs(&valid_indices, &invalid_indices);
+
+        // Decode coefficient matrix to recover the missing data shards
+        let missing_data_decode_coeffs: SmallVec<[&[u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+            invalid_indices
+                .iter()
+                .take_while(|i| **i < self.data_shard_count)
+                .map(|i| data_decode_coeffs.get_row(*i))
+                .collect();
+
+        self.apply_coeffs(
+            &missing_data_decode_coeffs,
+            &valid_shards,
+            &mut missing_data_shards,
+        );
+
+        // FIXME: reconstruct parity shards?
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+struct CheckReconstructShards {
+    non_empty_shard_count: usize,
+    shard_len: Option<usize>,
+}
+
+impl CheckReconstructShards {
+    fn new<T: ReconstructShard>(shards: &[T]) -> Result<CheckReconstructShards, Error> {
+        let mut shard_len = None;
+        let mut non_empty_shard_count = 0;
+        for shard in shards {
+            if let Some(len) = shard.len() {
+                if len == 0 {
+                    return Err(Error::EmptyShard);
+                }
+                non_empty_shard_count += 1;
+                if let Some(prev_len) = shard_len
+                    && len != prev_len
+                {
+                    return Err(Error::IncorrectShardSize);
+                }
+
+                shard_len = Some(len);
+            }
+        }
+
+        Ok(Self {
+            non_empty_shard_count,
+            shard_len,
+        })
     }
 }
 
