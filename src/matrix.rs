@@ -144,7 +144,7 @@ impl Matrix {
     /// Self: (m x k), other: (k x n) → returns (m x n)
     pub fn mul(&self, other: &Matrix) -> Matrix {
         debug_assert_eq!(
-            self.row_count, other.col_count,
+            self.col_count, other.row_count,
             "Incompatible matrix shapes"
         );
 

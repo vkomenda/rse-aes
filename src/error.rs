@@ -1,6 +1,6 @@
 use thiserror::Error as ThisError;
 
-#[derive(ThisError, Debug)]
+#[derive(ThisError, Debug, PartialEq, Eq)]
 pub enum Error {
     #[error("Incorrect shard size")]
     IncorrectShardSize,

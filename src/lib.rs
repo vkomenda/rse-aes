@@ -2,6 +2,9 @@ mod gftables;
 mod matrix;
 mod table_aes;
 
+#[cfg(test)]
+mod tests;
+
 pub mod error;
 
 use core::arch::x86_64::{self, __m512i};
@@ -74,6 +77,7 @@ impl<T: AsRef<[u8]> + AsMut<[u8]>> ReconstructShard for (T, bool) {
     }
 }
 
+#[derive(Debug)]
 pub struct ReedSolomon {
     data_shard_count: usize,
     parity_shard_count: usize,
@@ -142,7 +146,7 @@ impl ReedSolomon {
         T: AsRef<[u8]>,
         U: AsMut<[u8]>,
     {
-        let shard_len = coeffs[0].len();
+        let shard_len = input[0].as_ref().len();
         let num_chunks = shard_len / 64;
         let tail_len = shard_len % 64;
         let tail_offset = num_chunks * 64;
@@ -278,6 +282,39 @@ impl ReedSolomon {
         // FIXME: reconstruct parity shards?
 
         Ok(())
+    }
+
+    pub fn verify<T: std::fmt::Debug + AsRef<[u8]>>(&self, shards: &[T]) -> Result<bool, Error> {
+        // FIXME: checks
+
+        let shard_len = shards[0].as_ref().len();
+        let data_shards = &shards[0..self.data_shard_count];
+        let parity_shards_to_verify = &shards[self.data_shard_count..self.total_shard_count];
+        let encode_coeffs_parity_rows = self.get_encode_coeffs_parity_rows();
+        let mut new_parity_shards: SmallVec<[Vec<u8>; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+            iter::repeat_n(vec![0; shard_len], self.parity_shard_count).collect();
+
+        // assert_eq!(parity_shards_to_verify.len(), self.parity_shard_count);
+        // assert_eq!(new_parity_shards.len(), self.parity_shard_count);
+        // assert!(
+        //     parity_shards_to_verify
+        //         .iter()
+        //         .zip(new_parity_shards.clone())
+        //         .all(|(v, n)| v.as_ref().len() == n.len() && n.len() == shard_len)
+        // );
+
+        self.apply_coeffs(
+            &encode_coeffs_parity_rows,
+            data_shards,
+            &mut new_parity_shards,
+        );
+
+        let parity_shards_match = new_parity_shards
+            .iter_mut()
+            .zip(parity_shards_to_verify)
+            .all(|(new_shard, old_shard)| *new_shard == old_shard.as_ref());
+
+        Ok(parity_shards_match)
     }
 }
 
