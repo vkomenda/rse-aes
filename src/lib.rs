@@ -229,16 +229,14 @@ impl ReedSolomon {
         let shard_len = check.shard_len.expect("there are > 0 shards; qed");
 
         // FIXME: invalid_indices are not bound by data_shard_count, so the SmallVec should be larger.
-        let mut valid_shards: SmallVec<[&[u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
-            SmallVec::with_capacity(self.data_shard_count);
-        let mut valid_indices: SmallVec<[usize; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
-            SmallVec::with_capacity(self.data_shard_count);
-        let mut invalid_indices: SmallVec<[usize; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
-            SmallVec::with_capacity(self.data_shard_count);
-        let mut missing_data_shards: SmallVec<[&mut [u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
-            SmallVec::with_capacity(self.data_shard_count);
-        let mut missing_parity_shards: SmallVec<[&[u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
-            SmallVec::with_capacity(self.data_shard_count);
+        let mut valid_indices: SmallVec<[usize; 2 * DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+            SmallVec::with_capacity(self.total_shard_count);
+        let mut invalid_indices: SmallVec<[usize; 2 * DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+            SmallVec::with_capacity(self.total_shard_count);
+        let mut valid_shards: SmallVec<[&[u8]; 2 * DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+            SmallVec::with_capacity(self.total_shard_count);
+        let mut missing_shards: SmallVec<[&mut [u8]; 2 * DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+            SmallVec::with_capacity(self.total_shard_count);
 
         for (shard_idx, shard) in shards.iter_mut().enumerate() {
             match shard.get_or_initialize(shard_len) {
@@ -253,11 +251,7 @@ impl ReedSolomon {
                     invalid_indices.push(shard_idx);
                 }
                 Err(Ok(shard)) => {
-                    if shard_idx < self.data_shard_count {
-                        missing_data_shards.push(shard);
-                    } else {
-                        missing_parity_shards.push(shard);
-                    }
+                    missing_shards.push(shard);
                     invalid_indices.push(shard_idx);
                 }
             }
@@ -265,21 +259,14 @@ impl ReedSolomon {
 
         let data_decode_coeffs = self.get_data_decode_coeffs(&valid_indices, &invalid_indices);
 
-        // Decode coefficient matrix to recover the missing data shards
-        let missing_data_decode_coeffs: SmallVec<[&[u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+        // Decode coefficient matrix to recover the missing shards, both data and parity
+        let missing_decode_coeffs: SmallVec<[&[u8]; 2 * DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             invalid_indices
                 .iter()
-                .take_while(|i| **i < self.data_shard_count)
                 .map(|i| data_decode_coeffs.get_row(*i))
                 .collect();
 
-        self.apply_coeffs(
-            &missing_data_decode_coeffs,
-            &valid_shards,
-            &mut missing_data_shards,
-        );
-
-        // FIXME: reconstruct parity shards?
+        self.apply_coeffs(&missing_decode_coeffs, &valid_shards, &mut missing_shards);
 
         Ok(())
     }
