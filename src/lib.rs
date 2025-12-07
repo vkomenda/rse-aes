@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
-const DATA_DECODE_MATRIX_CACHE_CAPACITY: usize = 254;
+const DECODE_MATRIX_CACHE_CAPACITY: usize = 254;
 const DATA_OR_PARITY_SHARD_MAX_COUNT: usize = 32;
 
 /// Something which might hold a shard.
@@ -83,7 +83,7 @@ pub struct ReedSolomon {
     parity_shard_count: usize,
     total_shard_count: usize,
     encode_coeffs: Matrix,
-    data_decode_coeffs_cache: Mutex<LruCache<Vec<usize>, Arc<Matrix>>>,
+    decode_coeffs_cache: Mutex<LruCache<Vec<usize>, Arc<Matrix>>>,
 }
 
 impl ReedSolomon {
@@ -106,8 +106,8 @@ impl ReedSolomon {
             parity_shard_count: parity_shards,
             total_shard_count: total_shards,
             encode_coeffs,
-            data_decode_coeffs_cache: Mutex::new(LruCache::new(
-                DATA_DECODE_MATRIX_CACHE_CAPACITY
+            decode_coeffs_cache: Mutex::new(LruCache::new(
+                DECODE_MATRIX_CACHE_CAPACITY
                     .try_into()
                     .expect("non-0 constant; qed"),
             )),
@@ -184,35 +184,30 @@ impl ReedSolomon {
     //         .submatrix_rows(self.data_shard_count..self.total_shard_count)
     // }
 
-    fn get_data_decode_coeffs(
-        &self,
-        valid_indices: &[usize],
-        invalid_indices: &[usize],
-    ) -> Arc<Matrix> {
+    fn get_decode_coeffs(&self, valid_indices: &[usize]) -> Arc<Matrix> {
+        // Exactly data_shard_count shards are required to recover the remaining shards.
+        debug_assert!(valid_indices.len() == self.data_shard_count);
+
         {
-            let mut cache = self.data_decode_coeffs_cache.lock();
-            if let Some(entry) = cache.get(invalid_indices) {
+            let mut cache = self.decode_coeffs_cache.lock();
+            if let Some(entry) = cache.get(valid_indices) {
                 return entry.clone();
             }
         }
 
-        let mut inverted_decode_coeffs = Matrix::zero(self.data_shard_count, self.data_shard_count);
-        for (inverted_decode_coeffs_row, &valid_index) in valid_indices.iter().enumerate() {
+        let mut encode_coeffs = Matrix::zero(self.data_shard_count, self.data_shard_count);
+        for (encode_coeffs_row, &valid_index) in valid_indices.iter().enumerate() {
             for c in 0..self.data_shard_count {
-                inverted_decode_coeffs.set(
-                    inverted_decode_coeffs_row,
-                    c,
-                    self.encode_coeffs.get(valid_index, c),
-                );
+                encode_coeffs.set(encode_coeffs_row, c, self.encode_coeffs.get(valid_index, c));
             }
         }
-        let data_decode_coeffs = Arc::new(inverted_decode_coeffs.inv().unwrap());
+        let decode_coeffs = Arc::new(encode_coeffs.inv().unwrap());
         {
-            let data_decode_coeffs = data_decode_coeffs.clone();
-            let mut cache = self.data_decode_coeffs_cache.lock();
-            cache.put(Vec::from(invalid_indices), data_decode_coeffs);
+            let decode_coeffs = decode_coeffs.clone();
+            let mut cache = self.decode_coeffs_cache.lock();
+            cache.put(Vec::from(valid_indices), decode_coeffs);
         }
-        data_decode_coeffs
+        decode_coeffs
     }
 
     pub fn reconstruct<T: ReconstructShard>(&self, shards: &mut [T]) -> Result<(), Error> {
@@ -231,11 +226,11 @@ impl ReedSolomon {
         // FIXME: invalid_indices are not bound by data_shard_count, so the SmallVec should be larger.
         let mut valid_indices: SmallVec<[usize; 2 * DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             SmallVec::with_capacity(self.total_shard_count);
-        let mut invalid_indices: SmallVec<[usize; 2 * DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+        let mut invalid_indices: SmallVec<[usize; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             SmallVec::with_capacity(self.total_shard_count);
         let mut valid_shards: SmallVec<[&[u8]; 2 * DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             SmallVec::with_capacity(self.total_shard_count);
-        let mut missing_shards: SmallVec<[&mut [u8]; 2 * DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+        let mut missing_shards: SmallVec<[&mut [u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             SmallVec::with_capacity(self.total_shard_count);
 
         for (shard_idx, shard) in shards.iter_mut().enumerate() {
@@ -248,7 +243,8 @@ impl ReedSolomon {
                     }
                 }
                 Err(Err(_)) => {
-                    invalid_indices.push(shard_idx);
+                    // FIXME
+                    // invalid_indices.push(shard_idx);
                 }
                 Err(Ok(shard)) => {
                     missing_shards.push(shard);
@@ -257,13 +253,16 @@ impl ReedSolomon {
             }
         }
 
-        let data_decode_coeffs = self.get_data_decode_coeffs(&valid_indices, &invalid_indices);
+        println!("{valid_indices:?}");
+        println!("{invalid_indices:?}");
+
+        let decode_coeffs = self.get_decode_coeffs(&valid_indices);
 
         // Decode coefficient matrix to recover the missing shards, both data and parity
-        let missing_decode_coeffs: SmallVec<[&[u8]; 2 * DATA_OR_PARITY_SHARD_MAX_COUNT]> =
+        let missing_decode_coeffs: SmallVec<[&[u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             invalid_indices
                 .iter()
-                .map(|i| data_decode_coeffs.get_row(*i))
+                .map(|i| decode_coeffs.get_row(*i))
                 .collect();
 
         self.apply_coeffs(&missing_decode_coeffs, &valid_shards, &mut missing_shards);

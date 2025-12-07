@@ -135,6 +135,7 @@ impl Matrix {
     }
 
     pub fn encode_coeffs(total_shards: usize, data_shards: usize) -> Self {
+        // FIXME: top square is the identity
         let vander = Self::vandermonde(total_shards, data_shards);
         let top_square = vander.submatrix(0..data_shards, 0..data_shards);
         vander.mul(&top_square.inv().expect("square matrix; qed"))
