@@ -1,8 +1,12 @@
+use std::mem::MaybeUninit;
+
 use super::gftables;
 use smallvec::SmallVec;
 
 /// This value should have a corresponding implementation of the `smallvec::Array` trait.
 const DATA_ARRAY_SIZE: usize = 1024;
+
+const SELECTED_ROWS_MAX_SIZE: usize = 64;
 
 // const MAX_SUBMATRIX_ROWS: usize = 32;
 
@@ -15,7 +19,61 @@ pub struct Matrix {
     data: SmallVec<[u8; DATA_ARRAY_SIZE]>,
 }
 
+pub type RowMut<'a> = &'a mut [u8];
+pub type RowsMut<'a> = SmallVec<[RowMut<'a>; SELECTED_ROWS_MAX_SIZE]>;
+
+pub struct SubmatrixMut<'a> {
+    row_count: usize,
+    col_count: usize,
+    rows: RowsMut<'a>,
+}
+
+impl<'a> SubmatrixMut<'a> {
+    pub fn make_identity(&mut self) {
+        debug_assert_eq!(self.rows.len(), self.row_count);
+        debug_assert!(self.rows.iter().all(|row| row.len() == self.col_count));
+
+        for (i, row) in self.rows.iter_mut().enumerate() {
+            for (j, a) in row.iter_mut().enumerate() {
+                *a = (i == j) as u8;
+            }
+        }
+    }
+
+    pub fn make_vandermonde(&mut self) {
+        debug_assert_eq!(self.rows.len(), self.row_count);
+        debug_assert!(self.rows.iter().all(|row| row.len() == self.col_count));
+
+        for i in 0..self.row_count {
+            let row_gen = gftables::pow(gftables::GENERATING_ELEMENT, i + 1);
+            for j in 0..self.col_count {
+                let a = gftables::pow(row_gen, j);
+                self.rows[i][j] = a;
+            }
+        }
+    }
+}
+
 impl Matrix {
+    pub unsafe fn new_uninitialized(row_count: usize, col_count: usize) -> Self {
+        let total = row_count * col_count;
+
+        let mut tmp: SmallVec<[MaybeUninit<u8>; DATA_ARRAY_SIZE]> = SmallVec::with_capacity(total);
+
+        unsafe {
+            tmp.set_len(total); // now it contains uninitialized bytes
+        }
+
+        // Transmute SmallVec<MaybeUninit<u8>> → SmallVec<u8>
+        let data: SmallVec<[u8; DATA_ARRAY_SIZE]> = unsafe { std::mem::transmute(tmp) };
+
+        Matrix {
+            row_count,
+            col_count,
+            data,
+        }
+    }
+
     pub fn zero(row_count: usize, col_count: usize) -> Self {
         Self {
             row_count,
@@ -23,6 +81,9 @@ impl Matrix {
             data: SmallVec::from_vec(vec![0u8; row_count * col_count]),
         }
     }
+
+    // pub fn rows_mut(&mut self, ) -> RowsMut<'_> {
+    // }
 
     /// Access a coefficient (row j, col i)
     pub fn get(&self, row: usize, col: usize) -> u8 {
@@ -37,7 +98,7 @@ impl Matrix {
         self.data[row * self.col_count + col] = val;
     }
 
-    pub fn get_row(&self, row: usize) -> &[u8] {
+    pub fn row(&self, row: usize) -> &[u8] {
         let start = row * self.col_count;
         let end = start + self.col_count;
 
@@ -84,6 +145,53 @@ impl Matrix {
         }
 
         m
+    }
+
+    pub fn submatrix_mut<'a, R, C>(&'a mut self, row_range: R, col_range: C) -> SubmatrixMut<'a>
+    where
+        R: std::ops::RangeBounds<usize>,
+        C: std::ops::RangeBounds<usize>,
+    {
+        use std::ops::Bound::*;
+
+        let row_start = match row_range.start_bound() {
+            Included(&x) => x,
+            Excluded(&x) => x + 1,
+            Unbounded => 0,
+        };
+        let row_end = match row_range.end_bound() {
+            Included(&x) => x + 1,
+            Excluded(&x) => x,
+            Unbounded => self.row_count,
+        };
+
+        let col_start = match col_range.start_bound() {
+            Included(&x) => x,
+            Excluded(&x) => x + 1,
+            Unbounded => 0,
+        };
+        let col_end = match col_range.end_bound() {
+            Included(&x) => x + 1,
+            Excluded(&x) => x,
+            Unbounded => self.col_count,
+        };
+
+        let row_count = row_end - row_start;
+        let col_count = col_end - col_start;
+        let base_ptr = self.data.as_mut_ptr();
+
+        let rows: RowsMut = (row_start..row_end)
+            .map(|i| unsafe {
+                let row_ptr = base_ptr.add(i * self.col_count + col_start);
+                std::slice::from_raw_parts_mut(row_ptr, col_count)
+            })
+            .collect();
+
+        SubmatrixMut {
+            row_count,
+            col_count,
+            rows,
+        }
     }
 
     // pub fn submatrix_rows<R>(&self, row_range: R) -> SubmatrixRows
@@ -135,10 +243,16 @@ impl Matrix {
     }
 
     pub fn encode_coeffs(total_shards: usize, data_shards: usize) -> Self {
-        // FIXME: top square is the identity
-        let vander = Self::vandermonde(total_shards, data_shards);
-        let top_square = vander.submatrix(0..data_shards, 0..data_shards);
-        vander.mul(&top_square.inv().expect("square matrix; qed"))
+        let mut mat = unsafe { Self::new_uninitialized(total_shards, data_shards) };
+        {
+            let mut top_square = mat.submatrix_mut(0..data_shards, 0..data_shards);
+            top_square.make_identity();
+        }
+        {
+            let mut bottom_mat = mat.submatrix_mut(data_shards..total_shards, 0..data_shards);
+            bottom_mat.make_vandermonde();
+        }
+        mat
     }
 
     /// Multiply two matrices over GF(2^8) using the tables.

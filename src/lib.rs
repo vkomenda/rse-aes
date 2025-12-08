@@ -174,7 +174,7 @@ impl ReedSolomon {
 
     fn get_encode_coeffs_parity_rows(&self) -> SmallVec<[&[u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> {
         (self.data_shard_count..self.total_shard_count)
-            .map(|i| self.encode_coeffs.get_row(i))
+            .map(|i| self.encode_coeffs.row(i))
             .collect()
     }
 
@@ -262,7 +262,7 @@ impl ReedSolomon {
         let missing_decode_coeffs: SmallVec<[&[u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             invalid_indices
                 .iter()
-                .map(|i| decode_coeffs.get_row(*i))
+                .map(|i| decode_coeffs.row(*i))
                 .collect();
 
         self.apply_coeffs(&missing_decode_coeffs, &valid_shards, &mut missing_shards);

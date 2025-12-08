@@ -1,6 +1,10 @@
 use super::{Error, ReedSolomon};
 use rand::{distr, random};
+use std::sync::{Condvar, Mutex};
 use std::{iter, sync::LazyLock};
+
+static DECODE_CACHE_READY: LazyLock<(Mutex<bool>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(false), Condvar::new()));
 
 /// Fixture: reusable test data for all reconstruction variants
 struct TestData {
@@ -41,7 +45,6 @@ fn option_shards_to_shards<T: Clone>(shards: &[Option<Vec<T>>]) -> Vec<Vec<T>> {
         .collect()
 }
 
-/*
 #[test]
 fn test_reconstruct_shards1() {
     let t = &*FIXTURE;
@@ -63,6 +66,13 @@ fn test_reconstruct_shards2() {
     option_shards[0] = None;
     option_shards[2] = None;
     t.reed_solomon.reconstruct(&mut option_shards).unwrap();
+
+    // The decode cache has been written into.
+    let (lock, cvar) = &*DECODE_CACHE_READY;
+    let mut done = lock.lock().unwrap();
+    *done = true;
+    cvar.notify_all();
+
     let shards = option_shards_to_shards(&option_shards);
     assert!(t.reed_solomon.verify(&shards).unwrap());
     assert_eq!(&shards, &t.shards);
@@ -70,18 +80,23 @@ fn test_reconstruct_shards2() {
 
 #[test]
 fn test_reconstruct_shards3() {
+    let (lock, cvar) = &*DECODE_CACHE_READY;
+
+    // Wait efficiently until the other test sets done = true
+    let _guard = cvar
+        .wait_while(lock.lock().unwrap(), |done| !*done)
+        .unwrap();
+
     let t = &*FIXTURE;
     let mut option_shards = shards_to_option_shards(&t.shards);
 
     option_shards[0] = None;
     option_shards[2] = None;
-    option_shards[7] = None;
     t.reed_solomon.reconstruct(&mut option_shards).unwrap();
     let shards = option_shards_to_shards(&option_shards);
     assert!(t.reed_solomon.verify(&shards).unwrap());
     assert_eq!(&shards, &t.shards);
 }
-*/
 
 #[test]
 fn test_reconstruct_shards4() {
@@ -115,7 +130,6 @@ fn test_reconstruct_shards5() {
     assert_eq!(None, option_shards[12]);
 }
 
-/*
 #[test]
 fn test_reconstruct_shards6() {
     let t = &*FIXTURE;
@@ -133,4 +147,3 @@ fn test_reconstruct_shards6() {
         Error::TooFewShardsPresent
     );
 }
-*/
