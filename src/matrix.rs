@@ -1,12 +1,12 @@
 use std::mem::MaybeUninit;
 
 use super::gftables;
-use smallvec::SmallVec;
+use smallvec::{Array, SmallVec};
 
 /// This value should have a corresponding implementation of the `smallvec::Array` trait.
 const DATA_ARRAY_SIZE: usize = 1024;
 
-const SELECTED_ROWS_MAX_SIZE: usize = 64;
+pub const ROWS_ARRAY_MAX_SIZE: usize = 64;
 
 // const MAX_SUBMATRIX_ROWS: usize = 32;
 
@@ -19,20 +19,31 @@ pub struct Matrix {
     data: SmallVec<[u8; DATA_ARRAY_SIZE]>,
 }
 
+pub type RowRef<'a> = &'a [u8];
+pub type RowRefArr<'a> = SmallVec<[RowRef<'a>; ROWS_ARRAY_MAX_SIZE]>;
+
 pub type RowMut<'a> = &'a mut [u8];
-pub type RowsMut<'a> = SmallVec<[RowMut<'a>; SELECTED_ROWS_MAX_SIZE]>;
+pub type RowMutArr<'a> = SmallVec<[RowMut<'a>; ROWS_ARRAY_MAX_SIZE]>;
 
 pub struct SubmatrixMut<'a> {
     row_count: usize,
     col_count: usize,
-    rows: RowsMut<'a>,
+    rows: RowMutArr<'a>,
 }
 
 impl<'a> SubmatrixMut<'a> {
-    pub fn make_identity(&mut self) {
-        debug_assert_eq!(self.rows.len(), self.row_count);
-        debug_assert!(self.rows.iter().all(|row| row.len() == self.col_count));
+    pub fn new(row_count: usize, col_count: usize, rows: RowMutArr<'a>) -> Self {
+        debug_assert_eq!(rows.len(), row_count);
+        debug_assert!(rows.iter().all(|row| row.len() == col_count));
 
+        Self {
+            row_count,
+            col_count,
+            rows,
+        }
+    }
+
+    pub fn make_identity(&mut self) {
         for (i, row) in self.rows.iter_mut().enumerate() {
             for (j, a) in row.iter_mut().enumerate() {
                 *a = (i == j) as u8;
@@ -41,9 +52,6 @@ impl<'a> SubmatrixMut<'a> {
     }
 
     pub fn make_vandermonde(&mut self) {
-        debug_assert_eq!(self.rows.len(), self.row_count);
-        debug_assert!(self.rows.iter().all(|row| row.len() == self.col_count));
-
         for i in 0..self.row_count {
             let row_gen = gftables::pow(gftables::GENERATING_ELEMENT, i + 1);
             for j in 0..self.col_count {
@@ -82,8 +90,24 @@ impl Matrix {
         }
     }
 
-    // pub fn rows_mut(&mut self, ) -> RowsMut<'_> {
-    // }
+    pub fn from_rows<'a>(rows: RowRefArr<'a>) -> Self {
+        let row_count = rows.len();
+        let col_count = rows[0].len();
+        debug_assert!(rows.iter().all(|row| row.len() == col_count));
+
+        let mut data: SmallVec<[u8; DATA_ARRAY_SIZE]> =
+            SmallVec::with_capacity(row_count * col_count);
+
+        for row in rows.iter() {
+            data.extend_from_slice(row);
+        }
+
+        Self {
+            row_count,
+            col_count,
+            data,
+        }
+    }
 
     /// Access a coefficient (row j, col i)
     pub fn get(&self, row: usize, col: usize) -> u8 {
@@ -103,6 +127,10 @@ impl Matrix {
         let end = start + self.col_count;
 
         &self.data[start..end]
+    }
+
+    pub fn rows<'a>(&'a self) -> RowRefArr<'a> {
+        self.data.chunks(self.col_count).collect()
     }
 
     pub fn submatrix<R, C>(&self, row_range: R, col_range: C) -> Self
@@ -180,18 +208,14 @@ impl Matrix {
         let col_count = col_end - col_start;
         let base_ptr = self.data.as_mut_ptr();
 
-        let rows: RowsMut = (row_start..row_end)
+        let rows: RowMutArr = (row_start..row_end)
             .map(|i| unsafe {
                 let row_ptr = base_ptr.add(i * self.col_count + col_start);
                 std::slice::from_raw_parts_mut(row_ptr, col_count)
             })
             .collect();
 
-        SubmatrixMut {
-            row_count,
-            col_count,
-            rows,
-        }
+        SubmatrixMut::new(row_count, col_count, rows)
     }
 
     // pub fn submatrix_rows<R>(&self, row_range: R) -> SubmatrixRows
