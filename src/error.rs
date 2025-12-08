@@ -14,4 +14,6 @@ pub enum Error {
     EmptyShard,
     #[error("Too few shards present")]
     TooFewShardsPresent,
+    #[error("The number of reconstruct shards should be equal to the number of all shards")]
+    IncorrectReconstructShardNumber,
 }

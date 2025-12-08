@@ -239,6 +239,10 @@ impl ReedSolomon {
     }
 
     pub fn reconstruct<T: ReconstructShard>(&self, shards: &mut [T]) -> Result<(), Error> {
+        if shards.len() != self.total_shard_count {
+            return Err(Error::IncorrectReconstructShardNumber);
+        }
+
         let check = CheckReconstructShards::new(shards)?;
 
         if check.non_empty_shard_count == self.total_shard_count {
