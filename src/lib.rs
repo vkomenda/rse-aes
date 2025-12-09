@@ -9,12 +9,13 @@ pub mod error;
 
 use core::arch::x86_64::{self, __m512i};
 use core::iter::{self, FromIterator};
-use error::Error;
 use lru::LruCache;
 use matrix::Matrix;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::sync::Arc;
+
+pub use error::Error;
 
 const DECODE_MATRIX_CACHE_CAPACITY: usize = 254;
 const DATA_OR_PARITY_SHARD_MAX_COUNT: usize = 32;
