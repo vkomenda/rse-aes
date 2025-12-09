@@ -6,7 +6,7 @@ use smallvec::{Array, SmallVec};
 /// This value should have a corresponding implementation of the `smallvec::Array` trait.
 const DATA_ARRAY_SIZE: usize = 1024;
 
-pub const ROWS_ARRAY_MAX_SIZE: usize = 64;
+const ROWS_ARRAY_MAX_SIZE: usize = 64;
 
 // const MAX_SUBMATRIX_ROWS: usize = 32;
 
@@ -165,7 +165,7 @@ impl Matrix {
         let rows = row_end - row_start;
         let cols = col_end - col_start;
 
-        let mut m = Matrix::zero(rows, cols);
+        let mut m = unsafe { Matrix::new_uninitialized(rows, cols) };
         for (r, i) in (row_start..row_end).zip(0..) {
             for (c, j) in (col_start..col_end).zip(0..) {
                 m.set(i, j, self.get(r, c));
@@ -216,6 +216,10 @@ impl Matrix {
             .collect();
 
         SubmatrixMut::new(row_count, col_count, rows)
+    }
+
+    pub fn rows_mut<'a>(&'a mut self) -> RowMutArr<'a> {
+        self.data.chunks_mut(self.col_count).collect()
     }
 
     // pub fn submatrix_rows<R>(&self, row_range: R) -> SubmatrixRows
@@ -287,7 +291,7 @@ impl Matrix {
             "Incompatible matrix shapes"
         );
 
-        let mut out = Matrix::zero(self.row_count, other.col_count);
+        let mut out = unsafe { Matrix::new_uninitialized(self.row_count, other.col_count) };
 
         for i in 0..self.row_count {
             for j in 0..other.col_count {
@@ -315,21 +319,22 @@ impl Matrix {
         let n = self.row_count;
 
         // Start with augmented matrix [self | I]
-        // TODO: convert to SmallVec
-        let mut aug = vec![vec![0u8; 2 * n]; n];
+        let mut aug = Matrix::zero(n, 2 * n);
         for i in 0..n {
             for j in 0..n {
-                aug[i][j] = self.get(i, j);
+                aug.set(i, j, self.get(i, j));
             }
-            aug[i][n + i] = 1; // identity
+            aug.set(i, n + i, 1); // identity
         }
+
+        let mut rows = aug.rows_mut();
 
         // Gaussian elimination
         for i in 0..n {
             // Find pivot
             let mut pivot_row = None;
             for r in i..n {
-                if aug[r][i] != 0 {
+                if rows[r][i] != 0 {
                     pivot_row = Some(r);
                     break;
                 }
@@ -338,31 +343,31 @@ impl Matrix {
 
             // Swap to top
             if pivot_row != i {
-                aug.swap(i, pivot_row);
+                rows.swap(i, pivot_row);
             }
 
             // Scale pivot to 1
-            let inv_pivot = gftables::inv(aug[i][i]);
-            for j in 0..2 * n {
-                aug[i][j] = gftables::mul(aug[i][j], inv_pivot);
+            let inv_pivot = gftables::inv(rows[i][i]);
+            for a in rows[i].iter_mut() {
+                *a = gftables::mul(*a, inv_pivot);
             }
 
             // Eliminate other rows
             for r in 0..n {
-                if r != i && aug[r][i] != 0 {
-                    let factor = aug[r][i];
+                if r != i && rows[r][i] != 0 {
+                    let factor = rows[r][i];
                     for j in 0..2 * n {
-                        aug[r][j] ^= gftables::mul(factor, aug[i][j]);
+                        rows[r][j] ^= gftables::mul(factor, rows[i][j]);
                     }
                 }
             }
         }
 
         // Extract right half as inverse
-        let mut inv = Matrix::zero(n, n);
+        let mut inv = unsafe { Matrix::new_uninitialized(n, n) };
         for i in 0..n {
             for j in 0..n {
-                inv.set(i, j, aug[i][n + j]);
+                inv.set(i, j, rows[i][n + j]);
             }
         }
 

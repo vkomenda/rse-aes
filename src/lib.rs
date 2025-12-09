@@ -199,8 +199,8 @@ impl ReedSolomon {
     /// coefficient rows that encode available and missing shards respectively. Lastly, the returned
     /// reconstruction coefficients are calculated as C = G_m · G_v^{-1}.
     ///
-    /// G is stored in the cache at key `valid_indices`. This key is sufficient because it implies the
-    /// other dimension, that is `missing_indices`.
+    /// G is stored in the cache at the key `valid_indices`. This key is sufficient because it implies
+    /// the other dimension of G, that is `missing_indices`.
     fn decode_coeffs(&self, valid_indices: &[usize], missing_indices: &[usize]) -> Arc<Matrix> {
         // Exactly data_shard_count shards are required to recover the remaining shards.
         debug_assert_eq!(valid_indices.len(), self.data_shard_count);
@@ -255,15 +255,19 @@ impl ReedSolomon {
 
         let shard_len = check.shard_len.expect("there are > 0 shards; qed");
 
+        // indices of shards that are going to be used to recover a subset of the remaining shards
         let mut valid_indices: SmallVec<[usize; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             SmallVec::with_capacity(self.data_shard_count);
         // NOTE: reconstruct_indices indexes missing_indices
         let mut reconstruct_indices: SmallVec<[usize; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             SmallVec::with_capacity(self.total_shard_count);
+        // the complement of valid_indices
         let mut missing_indices: SmallVec<[usize; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             SmallVec::with_capacity(self.parity_shard_count);
+        // content of the input shards
         let mut valid_shards: SmallVec<[&[u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             SmallVec::with_capacity(self.data_shard_count);
+        // content of the output shards
         let mut reconstruct_shards: SmallVec<[&mut [u8]; DATA_OR_PARITY_SHARD_MAX_COUNT]> =
             SmallVec::with_capacity(self.total_shard_count);
 
