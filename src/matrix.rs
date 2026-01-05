@@ -1,16 +1,12 @@
 use std::mem::MaybeUninit;
 
 use super::gftables;
-use smallvec::{Array, SmallVec};
+use smallvec::SmallVec;
 
 /// This value should have a corresponding implementation of the `smallvec::Array` trait.
 const DATA_ARRAY_SIZE: usize = 1024;
 
 const ROWS_ARRAY_MAX_SIZE: usize = 64;
-
-// const MAX_SUBMATRIX_ROWS: usize = 32;
-
-// pub type SubmatrixRows = SmallVec<[&[u8]; MAX_SUBMATRIX_ROWS]>;
 
 #[derive(Debug, Clone)]
 pub struct Matrix {
@@ -59,6 +55,56 @@ impl<'a> SubmatrixMut<'a> {
                 self.rows[i][j] = a;
             }
         }
+    }
+
+    /// Swap rows in place.
+    fn swap_rows(&mut self, row1: usize, row2: usize) {
+        let (first, second) = if row1 < row2 {
+            (row1, row2)
+        } else {
+            (row2, row1)
+        };
+
+        let (left, right) = self.rows.split_at_mut(second);
+        left[first].swap_with_slice(right[0]);
+    }
+
+    /// In-place Gaussian elimination.
+    fn gaussian_elim(&mut self) -> Option<()> {
+        for i in 0..self.row_count {
+            // Find pivot
+            let mut pivot_row = None;
+            for r in i..self.row_count {
+                if self.rows[r][i] != 0 {
+                    pivot_row = Some(r);
+                    break;
+                }
+            }
+            let pivot_row = pivot_row?;
+
+            // Swap to top
+            if pivot_row != i {
+                self.swap_rows(i, pivot_row);
+            }
+
+            // Scale pivot to 1
+            let inv_pivot = gftables::inv(self.rows[i][i]);
+            for a in self.rows[i].iter_mut() {
+                *a = gftables::mul(*a, inv_pivot);
+            }
+
+            // Eliminate other rows
+            for r in 0..self.row_count {
+                if r != i && self.rows[r][i] != 0 {
+                    let factor = self.rows[r][i];
+                    for j in 0..self.col_count {
+                        let a = self.rows[r][j];
+                        self.rows[r][j] = a ^ gftables::mul(factor, self.rows[i][j]);
+                    }
+                }
+            }
+        }
+        Some(())
     }
 }
 
@@ -222,36 +268,6 @@ impl Matrix {
         self.data.chunks_mut(self.col_count).collect()
     }
 
-    // pub fn submatrix_rows<R>(&self, row_range: R) -> SubmatrixRows
-    // where
-    //     R: std::ops::RangeBounds<usize>,
-    // {
-    //     use std::ops::Bound::*;
-
-    //     let row_start = match row_range.start_bound() {
-    //         Included(&x) => x,
-    //         Excluded(&x) => x + 1,
-    //         Unbounded => 0,
-    //     };
-    //     let row_end = match row_range.end_bound() {
-    //         Included(&x) => x + 1,
-    //         Excluded(&x) => x,
-    //         Unbounded => self.row_count,
-    //     };
-
-    //     debug_assert!(row_end <= self.row_count);
-
-    //     let mut rows = SmallVec::with_capacity(row_end - row_start);
-
-    //     for i in row_start..row_end {
-    //         let begin = i * self.col_count;
-    //         let end = begin + self.col_count;
-    //         rows.push(&self.data[begin..end]);
-    //     }
-
-    //     rows
-    // }
-
     /// Build a Vandermonde matrix over GF(2^8) AES.
     pub fn vandermonde(row_count: usize, col_count: usize) -> Self {
         let data = (0..row_count)
@@ -308,7 +324,6 @@ impl Matrix {
         out
     }
 
-    // TODO: break down into augment and gaussian_elim
     /// Invert a square matrix over GF(2^8) using the tables.
     /// Returns None if the matrix is singular.
     pub fn inv(&self) -> Option<Matrix> {
@@ -327,47 +342,16 @@ impl Matrix {
             aug.set(i, n + i, 1); // identity
         }
 
-        let mut rows = aug.rows_mut();
-
-        // Gaussian elimination
-        for i in 0..n {
-            // Find pivot
-            let mut pivot_row = None;
-            for r in i..n {
-                if rows[r][i] != 0 {
-                    pivot_row = Some(r);
-                    break;
-                }
-            }
-            let pivot_row = pivot_row?;
-
-            // Swap to top
-            if pivot_row != i {
-                rows.swap(i, pivot_row);
-            }
-
-            // Scale pivot to 1
-            let inv_pivot = gftables::inv(rows[i][i]);
-            for a in rows[i].iter_mut() {
-                *a = gftables::mul(*a, inv_pivot);
-            }
-
-            // Eliminate other rows
-            for r in 0..n {
-                if r != i && rows[r][i] != 0 {
-                    let factor = rows[r][i];
-                    for j in 0..2 * n {
-                        rows[r][j] ^= gftables::mul(factor, rows[i][j]);
-                    }
-                }
-            }
+        {
+            let mut aug_rows = aug.submatrix_mut(.., ..);
+            aug_rows.gaussian_elim()?;
         }
 
         // Extract right half as inverse
         let mut inv = unsafe { Matrix::new_uninitialized(n, n) };
         for i in 0..n {
             for j in 0..n {
-                inv.set(i, j, rows[i][n + j]);
+                inv.set(i, j, aug.get(i, n + j));
             }
         }
 
